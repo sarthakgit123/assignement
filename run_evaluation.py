@@ -1,86 +1,172 @@
 import json
+import re
+from typing import Dict, List
 from rag_system import answer, _init_index, retriever
 
 
-import re
+GROUND_TRUTH = {
+    "P1": {
+        "target_doc": "dimensional-weight.md",
+        "key_facts": ["166"],
+    },
+    "P2": {
+        "target_doc": "facility-directory.md",
+        "key_facts": ["06:00", "22:00", "07:00", "14:00"],
+    },
+    "P3": {
+        "target_doc": "declared-value-insurance.md",
+        "key_facts": ["100"],
+    },
+    "P4": {
+        "target_doc": "hazmat-restrictions.md",
+        "key_facts": ["100"],
+    },
+    "P5": {
+        "target_doc": "claim-eligibility.md",
+        "key_facts": ["21"],
+    },
+    "P6": {
+        "target_doc": "customs-documentation.md",
+        "key_facts": ["invoice", "triplicate"],
+    },
+    "P7": {
+        "target_doc": "fuel-surcharge.md",
+        "key_facts": ["11"],
+    },
+    "P8": {
+        "target_doc": None,
+        "key_facts": ["don't know", "not contain", "does not cover", "not covered"],
+    },
+}
 
 
-def is_expected_in_text(expected: str, text: str) -> bool:
-    if not expected or not text:
-        return False
-    # normalize
-    def norm(s: str) -> str:
-        return re.sub(r"[^\w\s]", " ", s).lower()
+def check_key_facts(text: str, key_facts: List[str], answerable: bool) -> bool:
+    """Checks whether generated text contains mandatory key facts or refusal phrases."""
+    text_lower = text.lower()
+    if not answerable:
+        # Check if text contains any refusal phrase
+        return any(rf in text_lower for rf in key_facts)
 
-    n_expected = norm(expected)
-    n_text = norm(text)
+    # For answerable questions, check if at least one key fact / number is present
+    matches = sum(1 for kf in key_facts if kf.lower() in text_lower)
+    return matches >= 1
 
-    if n_expected.strip() and n_expected.strip() in n_text:
-        return True
 
-    # check numeric tokens
-    nums = re.findall(r"\d+", expected)
-    for n in nums:
-        if n in n_text:
-            return True
+def evaluate_question(q: Dict) -> Dict:
+    qid = q.get("id")
+    question = q.get("question")
+    answerable = q.get("answerable", True)
+    expected_ans = q.get("expected_answer", "")
 
-    # check long-word overlap (>=4 chars)
-    words = [w for w in n_expected.split() if len(w) >= 4]
-    match_count = sum(1 for w in words if w in n_text)
-    if words and match_count >= max(1, len(words) // 2):
-        return True
+    gt = GROUND_TRUTH.get(qid, {})
+    target_doc = gt.get("target_doc")
+    key_facts = gt.get("key_facts", [])
 
-    return False
+    # Call RAG pipeline answer function
+    res = answer(question)
+    supported = res.get("supported", False)
+    citations = res.get("citations", [])
+    ans_text = res.get("answer", "")
+
+    # 1. Refusal / Support evaluation
+    support_ok = (supported == answerable)
+
+    # 2. Citation Accuracy evaluation
+    if answerable:
+        # Check if expected target doc is in citations
+        top_citation = citations[0] if citations else None
+        citation_ok = (target_doc is not None) and (top_citation == target_doc or target_doc in citations)
+    else:
+        # Unanswerable question should have no citations or be explicitly refused
+        citation_ok = (len(citations) == 0 or not supported)
+
+    # 3. Fact / Content evaluation
+    fact_ok = check_key_facts(ans_text, key_facts, answerable)
+
+    # Overall outcome: all metrics pass
+    overall_pass = support_ok and citation_ok and fact_ok
+
+    return {
+        "id": qid,
+        "question": question,
+        "answerable": answerable,
+        "expected_answer": expected_ans,
+        "target_doc": target_doc,
+        "supported": supported,
+        "citations": citations,
+        "answer_text": ans_text,
+        "support_ok": support_ok,
+        "citation_ok": citation_ok,
+        "fact_ok": fact_ok,
+        "pass": overall_pass,
+    }
+
+
+def print_evaluation_report(results: List[Dict]):
+    total = len(results)
+    passed = sum(1 for r in results if r["pass"])
+    citation_passed = sum(1 for r in results if r["citation_ok"])
+    support_passed = sum(1 for r in results if r["support_ok"])
+    fact_passed = sum(1 for r in results if r["fact_ok"])
+
+    print("=" * 80)
+    print("                      COMPREHENSIVE RAG EVALUATION REPORT                      ")
+    print("=" * 80)
+    print(f"{'ID':<4} | {'Answerable':<10} | {'Target Doc':<25} | {'Supported':<10} | {'Status':<6}")
+    print("-" * 80)
+
+    for r in results:
+        target_str = r["target_doc"] if r["target_doc"] else "N/A (Refusal)"
+        status_str = "PASS" if r["pass"] else "FAIL"
+        ans_str = "Yes" if r["answerable"] else "No (Refuse)"
+        sup_str = "True" if r["supported"] else "False"
+        print(f"{r['id']:<4} | {ans_str:<10} | {target_str:<25} | {sup_str:<10} | {status_str:<6}")
+
+    print("-" * 80)
+    print(f"Overall Accuracy:           {passed}/{total} ({passed/total*100:.1f}%)")
+    print(f"Retrieval / Citation Acc:   {citation_passed}/{total} ({citation_passed/total*100:.1f}%)")
+    print(f"Refusal / Support Acc:      {support_passed}/{total} ({support_passed/total*100:.1f}%)")
+    print(f"Answer Fact Accuracy:       {fact_passed}/{total} ({fact_passed/total*100:.1f}%)")
+    print("=" * 80)
+
+    # Task 4 Requirement: Print 2-3 detailed example outputs
+    print("\n--- Task 4: Sample Output Demonstrations ---")
+    sample_ids = ["P1", "P2", "P8"]
+    for r in results:
+        if r["id"] in sample_ids:
+            print(f"\nQuestion [{r['id']}]: {r['question']}")
+            print(f"  Supported : {r['supported']}")
+            print(f"  Citations : {r['citations']}")
+            print(f"  Answer    : {r['answer_text'][:250].replace('\n', ' ')}")
+
+    # Task 4 Requirement: Write analysis on what went wrong and why
+    print("\n--- Task 4: Technical Analysis & Diagnosis ---")
+    print("1. Previous Failure Mode (Stop-word Pollution): The baseline retriever scored chunks")
+    print("   using raw token overlap without stop-word filtering. Query words like 'what', 'for',")
+    print("   'is' caused irrelevant files (e.g., comms-templates.md) to score high across queries.")
+    print("2. Evaluation Metric Flaw: The previous run_evaluation.py used naive regex number matching")
+    print("   and 4-letter word overlap, incorrectly grading bad answers as correct. It also checked")
+    print("   chunks_text as a fallback, masking whether answer() produced a valid output.")
+    print("3. Refusal Failure: Baseline rag_system set supported=True whenever any score > 0,")
+    print("   failing to refuse unanswerable questions like P8 (Meridian employee vacation policy).")
+    print("4. Fix Summary: Upgraded rag_system with stop-word tokenization, header-aware chunking,")
+    print("   domain term thresholding, and clean ground-truth evaluation in run_evaluation.py.")
 
 
 def main():
-    qs = json.load(open("questions.json", encoding="utf-8"))
-    # Print all questions being evaluated
-    print("Questions:")
-    for q in qs:
-        print(f"{q.get('id')}: {q.get('question')}")
-    print()
-    total = len(qs)
-    correct = 0
+    with open("questions.json", "r", encoding="utf-8") as f:
+        questions = json.load(f)
+
+    # Initialize index
+    _init_index()
+
     results = []
+    for q in questions:
+        res = evaluate_question(q)
+        results.append(res)
 
-    # ensure index built
-    index_bundle = _init_index()
-    idx = index_bundle["indexer"]
-    r = retriever(idx)
-
-    for q in qs:
-        qid = q.get("id")
-        question = q.get("question")
-        expected = q.get("expected_answer", "").strip()
-        res = answer(question)
-        supported = res.get("supported", False)
-        ans_text = res.get("answer", "")
-
-        # also check retrieved chunks for evidence
-        top_chunks = r.retrieve(question, top_k=5)
-        chunks_text = "\n\n".join([c.get("chunk_text", "") for c in top_chunks])
-
-        if q.get("answerable", False):
-            ok = is_expected_in_text(expected, ans_text) or is_expected_in_text(expected, chunks_text)
-        else:
-            ok = (not supported)
-
-        if ok:
-            correct += 1
-
-        results.append({"id": qid, "question": question, "expected": expected, "supported": supported, "ok": ok, "citations": res.get("citations", [])})
-
-    # concise summary and a few examples
-    print(f"Processed {total} questions. Correct: {correct}/{total}")
-    print("Examples:")
-    for r in results[:3]:
-        out = answer(r['question'])
-        print(f"{r['id']}: supported={r['supported']} correct={r['ok']} citations={r['citations']}")
-        print(f"  {out['answer'][:200].replace('\n', ' ')}")
-
-    print("\nShort analysis: retrieval can be noisy; consider finer chunking or embeddings for improvements.")
+    print_evaluation_report(results)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

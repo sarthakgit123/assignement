@@ -25,15 +25,15 @@ except Exception:
 
 
 class OpenRouterLLM:
-        """Light wrapper for OpenRouter chat completions.
+    """Light wrapper for OpenRouter chat completions.
 
-        Reads the API key from the environment variable named by `api_key_env`
-        (default: `OPENROUTER_API_KEY`).
+    Reads the API key from the environment variable named by `api_key_env`
+    (default: `OPENROUTER_API_KEY`).
 
-        Usage:
-            client = OpenRouterLLM()
-            client.generate_with_context(question, chunks)
-        """
+    Usage:
+        client = OpenRouterLLM()
+        client.generate_with_context(question, chunks)
+    """
 
     def __init__(self, api_key_env: str = "OPENROUTER_API_KEY", model: str = "gpt-4o-mini"):
         self.api_key = os.environ.get(api_key_env)
